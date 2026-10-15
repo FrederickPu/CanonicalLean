@@ -3,12 +3,15 @@ module
 public import Lean.Expr
 public import Lean.Meta.Basic
 public import Canonical.Canonical2.Util
+import Lean.Elab.Tactic.Simp
+import Lean.Elab.Tactic.SimpTrace
+import Lean.Elab.Tactic.Grind.Main
 import Lean.Elab.Tactic.Grind.Param
+import Lean.Meta.Tactic.ExposeNames
+import Lean.Meta.Tactic.Rfl
+import Lean.Meta.Tactic.LibrarySearch
+import Lean.Meta.Tactic.Grind.EMatchTheoremParam
 import Canonical.Symbols
-import Canonical.ToCanonical.Main
-import Canonical.Basic
-import Canonical.FromCanonical
-import Canonical.Main
 
 open Lean Meta Expr Elab Tactic
 
@@ -47,27 +50,6 @@ def preprocess (mvar : MVarId) : MetaM Unit := do
     try let _ ← automateSimp mvar #[] false
     catch _ => return
 
-def automateCanonical (original : MVarId) (suggestions : Array Name) (timeout : UInt64 := 30) : MetaM NameSet := do
-  let config := {}
-  let goal ← original.clone
-  let (premises, structs) ← Canonical.getPremises goal #[] config
-  let (goal', reconstruct) ← Canonical.preprocess goal config structs
-  let name := ((← getMCtx).findDecl? goal).get!.userName.toString
-  let decl ← Canonical.withArityUnfold config.monomorphize do goal'.withContext do
-    Canonical.toCanonical name (← goal'.getType) (suggestions ++ premises) (structs.push ``Canonical.Pi) config
-  if (← IO.checkCanceled) then throwError "canceled"
-  let result ← Canonical.canonical decl timeout config.count.toUSize
-  if (← IO.checkCanceled) then throwError "canceled"
-  let proofs ← Canonical.withArityUnfold config.monomorphize do goal'.withContext do
-    let proofs ← result.terms.mapM fun term => do Canonical.fromCanonical term (← goal'.getType)
-    let proofs ← proofs.mapM reconstruct
-    return proofs
-  if h : proofs.size > 0 then
-    original.assign proofs[0]
-    return .ofArray (suggestions.filter fun x => proofs[0].getUsedConstantsAsSet.contains x)
-  else
-    throwError "No proof found."
-
 def grindPremise (declName : Name) : MetaM Bool := do try
     let _ ← Lean.Elab.Tactic.addEMatchTheorem (← Grind.mkDefaultParams {})
       (mkIdent declName) declName (.default false) false
@@ -88,9 +70,8 @@ def automateLibrarySearch (mvar : MVarId) : MetaM NameSet := do
     throwError "No proof found."
   return {}
 
-def automateTasks (mvar : MVarId) (names : Array Name) (timeout : UInt64 := 30) : MetaM (List (MetaTask (NameSet))) := do
-  return [← (automateCanonical mvar names[:4].toArray timeout).toTask Canonical.cancel,
-      ← (automateGrind mvar names).toTask, ← (automateLibrarySearch mvar).toTask]
+def automateTasks (mvar : MVarId) (names : Array Name) (_timeout : UInt64 := 30) : MetaM (List (MetaTask (NameSet))) := do
+  return [← (automateGrind mvar names).toTask, ← (automateLibrarySearch mvar).toTask]
 
 def automate (mvar : MVarId) (names : Array Name) (timeout : UInt64 := 30) : MetaM (MetaTask Unit) := do
   let tasks ← automateTasks mvar names timeout
